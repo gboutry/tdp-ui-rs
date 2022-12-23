@@ -1,0 +1,14 @@
+[workspace]
+members = ["crates/api", "crates/ui"]
+resolver = "2"
+
+
+[patch.crates-io]
+openidconnect = { git = "https://github.com/ctron/openidconnect-rs", rev = "6ca4a9ab9de35600c44a8b830693137d4769edf4" }
+web-tree-sitter-sg = { git = "https://github.com/gboutry/web-tree-sitter-sg", rev ="9872e7f9c84b24256b852664ef19a26d93c5e6a7" }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = "z"
+
