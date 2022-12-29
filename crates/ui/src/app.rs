@@ -1,17 +1,14 @@
-use std::rc::Rc;
-
-use yew::prelude::*;
-use yew_router::prelude::*;
-
-use yew_oauth2::openid::*;
-use yew_oauth2::prelude::*;
-
-use tdp_api::apis::configuration::Configuration;
-
 use crate::components::Login;
 use crate::components::Logout;
 use crate::components::Navbar;
 use crate::routes::{switch, Route};
+use reqwest::{header, ClientBuilder};
+use std::rc::Rc;
+use tdp_api::apis::configuration::Configuration;
+use yew::prelude::*;
+use yew_oauth2::openid::*;
+use yew_oauth2::prelude::*;
+use yew_router::prelude::*;
 
 #[function_component(Application)]
 pub fn app() -> Html {
@@ -66,10 +63,21 @@ fn configuration_context(props: &Props) -> Html {
     let auth = use_context::<OAuth2Context>();
     if let Some(auth) = auth {
         if let OAuth2Context::Authenticated(auth) = auth {
+            let mut headers = header::HeaderMap::new();
+            let mut auth_value =
+                header::HeaderValue::from_str(&format!("Bearer {}", auth.access_token))
+                    .expect("Invalid header value");
+            auth_value.set_sensitive(true);
+            headers.insert(header::AUTHORIZATION, auth_value);
+
+            let client = ClientBuilder::new()
+                .default_headers(headers)
+                .build()
+                .expect("Failed to build reqwest client");
             let configuration = Rc::from(ConfigurationPEq(Configuration {
                 base_path: String::from("http://localhost:8000"),
-                oauth_access_token: Some(auth.access_token.clone()),
-                bearer_access_token: Some(auth.access_token),
+                client,
+                oauth_access_token: Some(auth.access_token),
                 ..Configuration::default()
             }));
 
