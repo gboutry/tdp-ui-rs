@@ -43,14 +43,22 @@ async fn initialize_parser() -> Result<Parser, JsValue> {
 }
 
 pub enum EditorMessage {
+    Error(JsValue),
+    Parser(ParserMessage),
+    Content(ContentMessage),
+    TreeUpdate,
+    Nothing,
+}
+
+pub enum ParserMessage {
     Initialize,
     Initialized(Parser),
-    Error(JsValue),
+}
+
+pub enum ContentMessage {
     UpdateInput(String),
     UpdateContent(AttrValue),
     ContentUpdated,
-    TreeUpdate,
-    Nothing,
 }
 
 pub enum ParserState {
@@ -72,7 +80,8 @@ impl Component for Editor {
     type Properties = EditorProps;
 
     fn create(ctx: &Context<Self>) -> Self {
-        ctx.link().send_message(EditorMessage::Initialize);
+        ctx.link()
+            .send_message(EditorMessage::Parser(ParserMessage::Initialize));
         Self {
             parser: ParserState::NotInitialized,
             tree: None,
@@ -83,31 +92,87 @@ impl Component for Editor {
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         match msg {
-            EditorMessage::Initialize => {
-                ctx.link().send_future(async {
-                    match initialize_parser().await {
-                        Ok(parser) => EditorMessage::Initialized(parser),
-                        Err(err) => EditorMessage::Error(err),
-                    }
-                });
-                self.parser = ParserState::NotInitialized;
-                true
-            }
-            EditorMessage::Initialized(parser) => {
-                let string = JsString::from_str(&ctx.props().content).unwrap();
-                self.tree = match parser
-                    .parse_with_string(&string, self.tree.as_ref(), None)
-                    .map_err(into_value)
-                {
-                    Ok(tree) => tree,
-                    Err(err) => {
-                        ctx.link().send_message(EditorMessage::Error(err));
-                        None
-                    }
-                };
-                ctx.link().send_message(EditorMessage::TreeUpdate);
-                self.parser = ParserState::Initialized(parser);
+            EditorMessage::Parser(parser_msg) => match parser_msg {
+                ParserMessage::Initialize => {
+                    ctx.link().send_future(async {
+                        match initialize_parser().await {
+                            Ok(parser) => EditorMessage::Parser(ParserMessage::Initialized(parser)),
+                            Err(err) => EditorMessage::Error(err),
+                        }
+                    });
+                    self.parser = ParserState::NotInitialized;
+                    true
+                }
+                ParserMessage::Initialized(parser) => {
+                    let string = JsString::from_str(&ctx.props().content).unwrap();
+                    self.tree = match parser
+                        .parse_with_string(&string, self.tree.as_ref(), None)
+                        .map_err(into_value)
+                    {
+                        Ok(tree) => tree,
+                        Err(err) => {
+                            ctx.link().send_message(EditorMessage::Error(err));
+                            None
+                        }
+                    };
+                    ctx.link().send_message(EditorMessage::TreeUpdate);
+                    self.parser = ParserState::Initialized(parser);
 
+                    true
+                }
+            },
+            EditorMessage::Content(content_msg) => {
+                match content_msg {
+                    ContentMessage::UpdateInput(input) => {
+                        let content = AttrValue::Rc(Rc::from(input));
+                        ctx.link().send_message(EditorMessage::Content(
+                            ContentMessage::UpdateContent(content),
+                        ));
+                        false
+                    }
+                    ContentMessage::UpdateContent(content) => {
+                        self.content = content;
+                        ctx.link()
+                            .send_message(EditorMessage::Content(ContentMessage::ContentUpdated));
+                        true
+                    }
+                    ContentMessage::ContentUpdated => {
+                        if let ParserState::Initialized(parser) = &self.parser {
+                            let parse_result = parser
+                                .parse_with_string(
+                                    &JsString::from(self.content.as_str()),
+                                    None, // Better handle change of the tree
+                                    None,
+                                )
+                                .map_err(into_value);
+                            if let Err(err) = parse_result {
+                                ctx.link().send_message(EditorMessage::Error(err));
+                                return true;
+                            };
+                            self.tree = parse_result.unwrap();
+                            ctx.link().send_message(EditorMessage::TreeUpdate);
+                            true
+                        } else {
+                            log::error!("Parser is not initialized, cannot handle input change");
+                            ctx.link().send_future({
+                                let link = ctx.link().clone();
+                                async move {
+                                    gloo_timers::callback::Timeout::new(1_000, move || {
+                                        link.send_message(EditorMessage::Content(
+                                            ContentMessage::ContentUpdated,
+                                        ));
+                                    })
+                                    .forget();
+                                    EditorMessage::Nothing
+                                }
+                            });
+                            false
+                        }
+                    }
+                }
+            }
+            EditorMessage::TreeUpdate => {
+                self.parse_tree = render_tree(self.tree.as_ref().unwrap());
                 true
             }
             EditorMessage::Error(err) => {
@@ -119,52 +184,6 @@ impl Component for Editor {
                 self.parser = ParserState::Error(err);
                 true
             }
-            EditorMessage::UpdateInput(input) => {
-                let content = AttrValue::Rc(Rc::from(input));
-                ctx.link()
-                    .send_message(EditorMessage::UpdateContent(content));
-                false
-            }
-            EditorMessage::UpdateContent(content) => {
-                self.content = content;
-                ctx.link().send_message(EditorMessage::ContentUpdated);
-                true
-            }
-            EditorMessage::ContentUpdated => {
-                if let ParserState::Initialized(parser) = &self.parser {
-                    let parse_result = parser
-                        .parse_with_string(
-                            &JsString::from(self.content.as_str()),
-                            None, // Better handle change of the tree
-                            None,
-                        )
-                        .map_err(into_value);
-                    if let Err(err) = parse_result {
-                        ctx.link().send_message(EditorMessage::Error(err));
-                        return true;
-                    };
-                    self.tree = parse_result.unwrap();
-                    ctx.link().send_message(EditorMessage::TreeUpdate);
-                    true
-                } else {
-                    log::error!("Parser is not initialized, cannot handle input change");
-                    ctx.link().send_future({
-                        let link = ctx.link().clone();
-                        async move {
-                            gloo_timers::callback::Timeout::new(1_000, move || {
-                                link.send_message(EditorMessage::ContentUpdated);
-                            })
-                            .forget();
-                            EditorMessage::Nothing
-                        }
-                    });
-                    false
-                }
-            }
-            EditorMessage::TreeUpdate => {
-                self.parse_tree = render_tree(self.tree.as_ref().unwrap());
-                true
-            }
             EditorMessage::Nothing => false,
         }
     }
@@ -172,7 +191,7 @@ impl Component for Editor {
     fn view(&self, ctx: &Context<Self>) -> Html {
         let on_input = ctx.link().callback(|e: InputEvent| {
             if let Some(input) = e.target_dyn_into::<HtmlTextAreaElement>() {
-                EditorMessage::UpdateInput(input.value())
+                EditorMessage::Content(ContentMessage::UpdateInput(input.value()))
             } else {
                 EditorMessage::Nothing
             }
@@ -206,7 +225,9 @@ impl Component for Editor {
     fn changed(&mut self, ctx: &Context<Self>, old_props: &Self::Properties) -> bool {
         if ctx.props().content != old_props.content {
             ctx.link()
-                .send_message(EditorMessage::UpdateContent(ctx.props().content.clone()));
+                .send_message(EditorMessage::Content(ContentMessage::UpdateContent(
+                    ctx.props().content.clone(),
+                )));
             true
         } else {
             false
